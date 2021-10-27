@@ -4222,7 +4222,7 @@ static LogicalResult verify(ONNXSpaceToDepthOp op) {
     return success();
   }
   auto inputType = input.getType().cast<ShapedType>();
-  auto inputShape = inputType.getShape();
+  const ArrayRef<int64_t> inputShape = inputType.getShape();
   if (inputShape.size() != 4)
     return op.emitError("Input should have a rank of four");
 

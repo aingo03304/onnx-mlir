@@ -2,13 +2,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-//===------------ DepthToSpace.cpp - Lowering DepthToSpace Op -------------===//
+//===---------- SpaceToDepth.cpp - Lowering SpaceToDepthOp ----------------===//
 //
 // Copyright 2021 The IBM Research Authors.
 //
 // =============================================================================
 //
-// This file lowers the ONNX DepthToSpace Operator to Krnl dialect.
+// This file lowers the ONNX SpaceToDepth Operator to Krnl dialect.
 //
 //===----------------------------------------------------------------------===//
 
@@ -16,29 +16,28 @@
 #include "src/Conversion/ONNXToKrnl/Tensor/Tensor.hpp"
 #include "src/Dialect/Krnl/KrnlHelper.hpp"
 #include "src/Dialect/ONNX/ShapeInference/ONNXShapeHelper.hpp"
-#include "llvm/IR/Constants.h"
 #include "llvm/Support/Debug.h"
 
 using namespace mlir;
 using llvm::dbgs;
 
-#define DEBUG_TYPE "depth_to_space_onnx_to_krnl"
+#define DEBUG_TYPE "space_to_depth_onnx_to_krnl"
 
-class ONNXDepthToSpaceOpLowering : public ONNXShapeConversions {
+class ONNXSpaceToDepthOpLowering : public ONNXShapeConversions {
 public:
-  ONNXDepthToSpaceOpLowering(MLIRContext *ctx)
-      : ONNXShapeConversions(ONNXDepthToSpaceOp::getOperationName(), 1, ctx) {}
+  ONNXSpaceToDepthOpLowering(MLIRContext *ctx)
+      : ONNXShapeConversions(ONNXSpaceToDepthOp::getOperationName(), 1, ctx) {}
 
   LogicalResult matchAndRewrite(Operation *op, ArrayRef<Value> operands,
       ConversionPatternRewriter &rewriter) const final {
-    auto spaceToDepthOp = dyn_cast_or_null<ONNXDepthToSpaceOp>(op);
-    assert(spaceToDepthOp && "Expecting op to have type ONNXDepthToSpaceOp");
+    auto spaceToDepthOp = dyn_cast_or_null<ONNXSpaceToDepthOp>(op);
+    assert(spaceToDepthOp && "Expecting op to have type ONNXSpaceToDepthOp");
 
     // Ensure we can compute the operator output shape.
-    ONNXDepthToSpaceOpShapeHelper shapeHelper(&spaceToDepthOp, &rewriter,
+    ONNXSpaceToDepthOpShapeHelper shapeHelper(&spaceToDepthOp, &rewriter,
         getDenseElementAttributeFromKrnlValue,
         loadDenseElementArrayValueAtIndex);
-    ONNXDepthToSpaceOpAdaptor operandAdaptor(operands);
+    ONNXSpaceToDepthOpAdaptor operandAdaptor(operands);
     LogicalResult shapeComputed = shapeHelper.computeShape(operandAdaptor);
     (void)shapeComputed;
     assert(succeeded(shapeComputed) && "Could not compute output shape");
@@ -46,7 +45,6 @@ public:
     Location loc = spaceToDepthOp.getLoc();
     Value input = spaceToDepthOp.input();
     int64_t bs = spaceToDepthOp.blocksize();
-    StringRef mode = spaceToDepthOp.mode();
 
     // Compute the new dimensions.
     MemRefBoundsIndexCapture bounds(input);
@@ -56,37 +54,24 @@ public:
     DimIndexExpr C(bounds.getDim(1));
     DimIndexExpr H(bounds.getDim(2));
     DimIndexExpr W(bounds.getDim(3));
-    DimIndexExpr newC = C.floorDiv(bs * bs);
-    DimIndexExpr newH = H * bs;
-    DimIndexExpr newW = W * bs;
+    DimIndexExpr newC = C * (bs * bs);
+    DimIndexExpr newH = H.floorDiv(bs);
+    DimIndexExpr newW = W.floorDiv(bs);
 
-    // Compute the output dimension of the first reshape operation, and the
-    // permutation array for the transpose operation.
+    // Reshape input tensor to shape [B, C, H/bs, bs, W/bs, bs].
     LiteralIndexExpr bsLit(bs);
-    SmallVector<DimIndexExpr, 6> outputDims1;
-    SmallVector<int64_t, 6> perm;
-    if (mode == "DCR") {
-      outputDims1 = {B, bsLit, bsLit, newC, H, W};
-      perm = {0, 3, 4, 1, 5, 2};
-    } else {
-      assert(mode == "CRD" && "Unexpected mode");
-      outputDims1 = {B, newC, bsLit, bsLit, H, W};
-      perm = {0, 1, 4, 2, 5, 3};
-    }
-
-    // Reshape input tensor to shape:
-    //   [B, bs, bs, C/(bs*bs), H, W] when mode=DCR
-    //   [B, C/(bs*bs), bs, bs, H, W] when mode=CRD
+    SmallVector<DimIndexExpr> outputDims1({B, C, newH, bsLit, newW, bsLit});
     Value reshapeRes1 = reshape(input, outputDims1, rewriter, loc);
     LLVM_DEBUG(dbgs() << "reshapeRes1: " << reshapeRes1 << "\n");
 
-    // Transpose the reshape result into shape [B, C/(bs*bs), H, bs, W, bs].
-    SmallVector<DimIndexExpr> outputDims2({B, newC, H, bsLit, W, bsLit});
+    // Transpose the reshape result into shape [B, C, bs, bs, H/bs, W/bs].
+    SmallVector<DimIndexExpr> outputDims2({B, C, bsLit, bsLit, newH, newW});
+    SmallVector<int64_t> perm({0, 1, 3, 5, 2, 4});
     Value transposeRes =
         transpose(reshapeRes1, outputDims2, perm, rewriter, loc);
     LLVM_DEBUG(dbgs() << "transposeRes: " << transposeRes << "\n");
 
-    // Reshape the transpose result into shape [B, C/(bs*bs), H*bs, W*bs].
+    // Reshape the transpose result into shape [B, C*bs*bs, H/bs, W/bs].
     SmallVector<DimIndexExpr> outputDims3({B, newC, newH, newW});
     Value reshapeRes2 = reshape(transposeRes, outputDims3, rewriter, loc);
     LLVM_DEBUG(dbgs() << "reshapeRes2: " << reshapeRes2 << "\n");
@@ -97,7 +82,7 @@ public:
   }
 };
 
-void populateLoweringONNXDepthToSpaceOpPattern(
+void populateLoweringONNXSpaceToDepthOpPattern(
     RewritePatternSet &patterns, MLIRContext *ctx) {
-  patterns.insert<ONNXDepthToSpaceOpLowering>(ctx);
+  patterns.insert<ONNXSpaceToDepthOpLowering>(ctx);
 }

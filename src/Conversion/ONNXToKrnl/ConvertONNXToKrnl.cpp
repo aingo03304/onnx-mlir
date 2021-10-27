@@ -202,6 +202,7 @@ void FrontendToKrnlLoweringPass::runOnOperation() {
   populateLoweringONNXDepthToSpaceOpPattern(patterns, &getContext());
   populateLoweringONNXShapeOpPattern(patterns, &getContext());
   populateLoweringONNXSliceOpPattern(patterns, &getContext());
+  populateLoweringONNXSpaceToDepthOpPattern(patterns, &getContext());
   populateLoweringONNXSqueezeOpPattern(patterns, &getContext());
   populateLoweringONNXSqueezeV11OpPattern(patterns, &getContext());
   populateLoweringONNXSplitOpPattern(patterns, &getContext());
